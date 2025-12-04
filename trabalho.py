@@ -39,6 +39,10 @@ Z_BASE = 0.6 - (6.0 * round(0.01 * RAIO_CILINDRO, 5))
 # Estado Global de Pintura
 estou_pintando = False
 
+# Ajustes auxiliares para controlar a profundidade de contato
+RAZAO_SEG_CILINDRO = np.clip(TAMANHO_SEGMENTO / RAIO_CILINDRO, -0.999, 0.999)
+PROFUNDIDADE_CONTATO = -(RAIO_CILINDRO * (1 - np.sqrt(1 - RAZAO_SEG_CILINDRO ** 2)))
+
 class Direcao(Enum):
     CIMA = 1
     BAIXO = 2
@@ -137,176 +141,179 @@ def desenhar_segmento(t, pos_digito, x_offset, y_base, z_base, direcao):
 
     return pos_final, vel_vector
 
+def deslocamento_curvo(tempo_atual, tempo_limite, invertido):
+    """Calcula o deslocamento em X sobre a casca do cilindro."""
+    inicio_segmento = tempo_limite - TEMPO_POR_SEGMENTO
+    if invertido:
+        progresso = (tempo_limite - tempo_atual) / TEMPO_POR_SEGMENTO
+    else:
+        progresso = (tempo_atual - inicio_segmento) / TEMPO_POR_SEGMENTO
+    progresso = np.clip(progresso, 0.0, 1.0)
+    argumento = np.clip((TAMANHO_SEGMENTO * progresso) / RAIO_CILINDRO, -0.999, 0.999)
+    angulo = np.arcsin(argumento)
+    if invertido:
+        angulo = -angulo
+    return -(RAIO_CILINDRO - np.cos(angulo) * RAIO_CILINDRO)
+
+def criar_passo(limite_em_segmentos, modo_x, y_ref, z_ref, direcao, pinta=False):
+    return {
+        "limite": limite_em_segmentos,
+        "modo_x": modo_x,
+        "y": y_ref,
+        "z": z_ref,
+        "direcao": direcao,
+        "pinta": pinta,
+    }
+
+def resolver_offset_x(passo, tempo_atual, tempo_limite):
+    match passo["modo_x"]:
+        case "recuo":
+            return OFFSET_SEM_TINTA
+        case "reta":
+            return 0
+        case "constante":
+            return PROFUNDIDADE_CONTATO
+        case "curva_topo":
+            return deslocamento_curvo(tempo_atual, tempo_limite, True)
+        case "curva_base":
+            return deslocamento_curvo(tempo_atual, tempo_limite, False)
+    return OFFSET_SEM_TINTA
+
+def executar_digito(tt, pos, roteiro, fallback_y, fallback_z):
+    """Percorre o roteiro até achar o segmento ativo."""
+    global estou_pintando
+    for passo in roteiro:
+        limite_abs = passo["limite"] * TEMPO_POR_SEGMENTO
+        if tt <= limite_abs:
+            estou_pintando = passo["pinta"]
+            offset_x = resolver_offset_x(passo, tt, limite_abs)
+            return desenhar_segmento(tt, pos, offset_x, passo["y"], passo["z"], passo["direcao"])
+    estou_pintando = False
+    return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, fallback_y, fallback_z, Direcao.NENHUMA)
+
 # --- Definição dos Dígitos (Máquina de Estados) ---
 # X_P é a profundidade curva calculada. Quando é 0 ou offset, é reta.
 
 def draw_0(tt, pos):
-    global estou_pintando
-    estou_pintando = False
-    ts = TEMPO_POR_SEGMENTO
-
-    # Movimento de aproximação
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-
-    # Começa a pintar
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_MEIO), Y_INFERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 5*ts, Z_BASE), Y_INFERIOR, Z_BASE, Direcao.ESQUERDA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_TOPO), Y_SUPERIOR, Z_BASE, Direcao.CIMA)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.CIMA)
-    elif tt <= 8*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 8*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.DIREITA)
-
-    # Fim
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(4.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(5.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+        criar_passo(6.0, "curva_topo", Y_SUPERIOR, Z_BASE, Direcao.CIMA, True),
+        criar_passo(7.0, "curva_base", Y_SUPERIOR, Z_MEIO, Direcao.CIMA, True),
+        criar_passo(8.0, "curva_topo", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_INFERIOR, Z_TOPO)
 
 def draw_1(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_MEIO), Y_INFERIOR, Z_MEIO, Direcao.BAIXO)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(4.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_INFERIOR, Z_BASE)
 
 def draw_2(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.DIREITA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.ESQUERDA) # 0 pois é reto horizontal
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_MEIO), Y_INFERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_BASE), Y_INFERIOR, Z_BASE, Direcao.DIREITA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+        criar_passo(4.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(5.0, "reta", Y_INFERIOR, Z_MEIO, Direcao.ESQUERDA, True),
+        criar_passo(6.0, "curva_base", Y_SUPERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(7.0, "constante", Y_SUPERIOR, Z_BASE, Direcao.DIREITA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_SUPERIOR, Z_BASE)
 
 def draw_3(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.DIREITA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.ESQUERDA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, 0, Y_INFERIOR, Z_MEIO, Direcao.DIREITA)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 8*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 8*ts, Z_BASE), Y_SUPERIOR, Z_BASE, Direcao.ESQUERDA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+        criar_passo(4.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(5.0, "reta", Y_INFERIOR, Z_MEIO, Direcao.ESQUERDA, True),
+        criar_passo(6.0, "reta", Y_SUPERIOR, Z_MEIO, Direcao.DIREITA, True),
+        criar_passo(7.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(8.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_INFERIOR, Z_BASE)
 
 def draw_4(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, 0, Y_INFERIOR, Z_MEIO, Direcao.DIREITA)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 5*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.CIMA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "curva_topo", Y_SUPERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(4.0, "reta", Y_SUPERIOR, Z_MEIO, Direcao.DIREITA, True),
+        criar_passo(5.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.CIMA, True),
+        criar_passo(6.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(7.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_INFERIOR, Z_BASE)
 
 def draw_5(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.ESQUERDA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, 0, Y_INFERIOR, Z_MEIO, Direcao.DIREITA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_BASE), Y_SUPERIOR, Z_BASE, Direcao.ESQUERDA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_INFERIOR, Z_TOPO, Direcao.ESQUERDA, True),
+        criar_passo(4.0, "curva_topo", Y_SUPERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(5.0, "reta", Y_SUPERIOR, Z_MEIO, Direcao.DIREITA, True),
+        criar_passo(6.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(7.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_SUPERIOR, Z_BASE)
 
 def draw_6(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.ESQUERDA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, 0, Y_INFERIOR, Z_MEIO, Direcao.DIREITA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_BASE), Y_SUPERIOR, Z_BASE, Direcao.ESQUERDA)
-    elif tt <= 8*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 8*ts, Z_BASE), Y_INFERIOR, Z_BASE, Direcao.CIMA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_MEIO, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_INFERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_INFERIOR, Z_TOPO, Direcao.ESQUERDA, True),
+        criar_passo(4.0, "curva_topo", Y_SUPERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(5.0, "constante", Y_SUPERIOR, Z_MEIO, Direcao.DIREITA, True),
+        criar_passo(6.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(7.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+        criar_passo(8.0, "curva_topo", Y_SUPERIOR, Z_BASE, Direcao.CIMA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_SUPERIOR, Z_MEIO)
 
 def draw_7(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 2*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 3*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.DIREITA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 5*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(2.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+        criar_passo(4.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(5.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_INFERIOR, Z_BASE)
 
 def draw_8(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_MEIO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.ESQUERDA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_MEIO), Y_INFERIOR, Z_MEIO, Direcao.CIMA)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 5*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.DIREITA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 8*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 8*ts, Z_BASE), Y_SUPERIOR, Z_BASE, Direcao.ESQUERDA)
-    elif tt <= 9*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 9*ts, Z_BASE), Y_INFERIOR, Z_BASE, Direcao.CIMA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_MEIO, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_MEIO, Direcao.NENHUMA),
+        criar_passo(2.0, "reta", Y_INFERIOR, Z_MEIO, Direcao.NENHUMA),
+        criar_passo(3.0, "constante", Y_INFERIOR, Z_MEIO, Direcao.ESQUERDA, True),
+        criar_passo(4.0, "curva_base", Y_SUPERIOR, Z_MEIO, Direcao.CIMA, True),
+        criar_passo(5.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+        criar_passo(6.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(7.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(8.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+        criar_passo(9.0, "curva_topo", Y_SUPERIOR, Z_BASE, Direcao.CIMA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_SUPERIOR, Z_MEIO)
 
 def draw_9(tt, pos):
-    global estou_pintando
-    ts = TEMPO_POR_SEGMENTO
-    if tt <= 1.5*ts: return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_SUPERIOR, Z_MEIO, Direcao.NENHUMA)
-    elif tt <= 2*ts: return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.NENHUMA)
-    elif tt <= 3*ts:
-        estou_pintando = True
-        return desenhar_segmento(tt, pos, 0, Y_SUPERIOR, Z_MEIO, Direcao.ESQUERDA)
-    elif tt <= 4*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 4*ts, Z_MEIO), Y_INFERIOR, Z_MEIO, Direcao.CIMA)
-    elif tt <= 5*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 5*ts, Z_TOPO), Y_INFERIOR, Z_TOPO, Direcao.DIREITA)
-    elif tt <= 6*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 6*ts, Z_TOPO), Y_SUPERIOR, Z_TOPO, Direcao.BAIXO)
-    elif tt <= 7*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 7*ts, Z_MEIO), Y_SUPERIOR, Z_MEIO, Direcao.BAIXO)
-    elif tt <= 8*ts: return desenhar_segmento(tt, pos, calcular_profundidade_x(tt, 8*ts, Z_BASE), Y_SUPERIOR, Z_BASE, Direcao.ESQUERDA)
-    else:
-        estou_pintando = False
-        return desenhar_segmento(tt, pos, OFFSET_SEM_TINTA, Y_INFERIOR, Z_BASE, Direcao.NENHUMA)
+    roteiro = [
+        criar_passo(1.5, "recuo", Y_INFERIOR, Z_MEIO, Direcao.NENHUMA),
+        criar_passo(2.0, "reta", Y_INFERIOR, Z_MEIO, Direcao.NENHUMA),
+        criar_passo(3.0, "reta", Y_INFERIOR, Z_MEIO, Direcao.ESQUERDA, True),
+        criar_passo(4.0, "curva_base", Y_SUPERIOR, Z_MEIO, Direcao.CIMA, True),
+        criar_passo(5.0, "constante", Y_SUPERIOR, Z_TOPO, Direcao.DIREITA, True),
+        criar_passo(6.0, "curva_topo", Y_INFERIOR, Z_TOPO, Direcao.BAIXO, True),
+        criar_passo(7.0, "curva_base", Y_INFERIOR, Z_MEIO, Direcao.BAIXO, True),
+        criar_passo(8.0, "constante", Y_INFERIOR, Z_BASE, Direcao.ESQUERDA, True),
+    ]
+    return executar_digito(tt, pos, roteiro, Y_SUPERIOR, Z_BASE)
 
 # Mapa de complexidade (quantos segmentos cada número tem)
 def obter_duracao_numero(n):
@@ -455,5 +462,5 @@ sim.add(point_cloud)
 for i in range(imax):
     point_cloud.add_ani_frame(i * dt, 0, i) # Mostra o ponto i no tempo i
 
-# Salvar e Rodar
+# Salvar e Rodar
 sim.run()
