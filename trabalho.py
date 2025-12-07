@@ -1,5 +1,3 @@
-### código escreve bem o 1 e o resta descaralha
-
 import numpy as np
 import uaibot as ub
 import sys
@@ -8,7 +6,7 @@ import random
 from enum import Enum
 
 # ==============================================================================
-# 1. CONFIGURAÇÕES GERAIS E CONSTANTES
+# 1. CONFIGURAÇÕES GERAIS E CONSTANTES 
 # ==============================================================================
 PI = math.pi
 
@@ -17,29 +15,34 @@ RAIO_CILINDRO = round(random.uniform(0.15, 0.3), 3)
 ALTURA_CILINDRO = 2.0
 POSICAO_CILINDRO = [0.8, 0, 0.7]
 
-# Configurações de Desenho (Especificações do Problema)
-DISTANCIA_SEGURANCA = 0.05  # 50mm de distância da superfície
+# Configurações de Desenho
+DISTANCIA_SEGURANCA = 0.05
 POSICAO_X_SUPERFICIE = 0.8 - RAIO_CILINDRO - DISTANCIA_SEGURANCA
 
-# Configurações dos Segmentos (Tamanho e Tempo)
+# --- CORREÇÃO DE GEOMETRIA ---
+# Definimos o tamanho do traço primeiro
 TAMANHO_SEGMENTO = 0.1 + round(0.01 * RAIO_CILINDRO, 5)
-TEMPO_POR_SEGMENTO = 2.0  # Segundos para desenhar cada traço
-ESPACO_ENTRE_DIGITOS = 0.15 # Distância Y entre os números
-OFFSET_SEM_TINTA = 0.005 # Recuo extra quando não está desenhando
 
+# O grid agora obedece estritamente ao tamanho do segmento
+# Isso garante que o fim de um traço seja EXATAMENTE o início do outro
+METADE_LARGURA = TAMANHO_SEGMENTO / 2.0
 
-# Definição dos Limites do "Display de 7 Segmentos" no Espaço 3D
-# Y: Horizontal, Z: Vertical
-Y_SUPERIOR = 0.05 + (2.0 * round(0.01 * RAIO_CILINDRO, 5))
-Y_INFERIOR = -0.05 - (2.0 * round(0.01 * RAIO_CILINDRO, 5))
-Z_TOPO = 0.8 + (6.0 * round(0.01 * RAIO_CILINDRO, 5))
+Y_SUPERIOR = METADE_LARGURA
+Y_INFERIOR = -METADE_LARGURA
+
 Z_MEIO = 0.7
-Z_BASE = 0.6 - (6.0 * round(0.01 * RAIO_CILINDRO, 5))
+Z_TOPO = Z_MEIO + TAMANHO_SEGMENTO
+Z_BASE = Z_MEIO - TAMANHO_SEGMENTO
+# -----------------------------
+
+TEMPO_POR_SEGMENTO = 2.0
+ESPACO_ENTRE_DIGITOS = TAMANHO_SEGMENTO * 1.5 # Ajuste dinâmico do espaçamento
+OFFSET_SEM_TINTA = 0.005
 
 # Estado Global de Pintura
 estou_pintando = False
 
-# Ajustes auxiliares para controlar a profundidade de contato
+# Ajustes auxiliares
 RAZAO_SEG_CILINDRO = np.clip(TAMANHO_SEGMENTO / RAIO_CILINDRO, -0.999, 0.999)
 PROFUNDIDADE_CONTATO = -(RAIO_CILINDRO * (1 - np.sqrt(1 - RAZAO_SEG_CILINDRO ** 2)))
 
@@ -462,5 +465,5 @@ sim.add(point_cloud)
 for i in range(imax):
     point_cloud.add_ani_frame(i * dt, 0, i) # Mostra o ponto i no tempo i
 
-# Salvar e Rodar
+# Salvar e Rodar
 sim.run()
